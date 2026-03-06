@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import os from "node:os";
 
 const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
@@ -61,13 +62,13 @@ const sqlValue = (v) => {
   return `'${String(v).replace(/'/g, "''")}'`;
 };
 
-const lines = [];
-lines.push("-- Auto-generated from quiz.db");
-lines.push("PRAGMA foreign_keys = OFF;");
-lines.push("BEGIN TRANSACTION;");
-lines.push("DELETE FROM results;");
-lines.push("DELETE FROM questions;");
-lines.push("DELETE FROM subjects;");
+const dataLines = [];
+dataLines.push("-- Auto-generated from quiz.db");
+dataLines.push("PRAGMA foreign_keys = OFF;");
+dataLines.push("BEGIN TRANSACTION;");
+dataLines.push("DELETE FROM results;");
+dataLines.push("DELETE FROM questions;");
+dataLines.push("DELETE FROM subjects;");
 
 const counts = {};
 for (const table of tables) {
@@ -77,29 +78,29 @@ for (const table of tables) {
 
   for (const row of rows) {
     const values = table.columns.map((col) => sqlValue(row[col]));
-    lines.push(
+    dataLines.push(
       `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${values.join(", ")});`
     );
   }
 }
 
-lines.push(
+dataLines.push(
   "DELETE FROM sqlite_sequence WHERE name IN ('subjects','questions','results');"
 );
-lines.push(
+dataLines.push(
   "INSERT INTO sqlite_sequence(name, seq) VALUES ('subjects', COALESCE((SELECT MAX(id) FROM subjects), 0));"
 );
-lines.push(
+dataLines.push(
   "INSERT INTO sqlite_sequence(name, seq) VALUES ('questions', COALESCE((SELECT MAX(id) FROM questions), 0));"
 );
-lines.push(
+dataLines.push(
   "INSERT INTO sqlite_sequence(name, seq) VALUES ('results', COALESCE((SELECT MAX(id) FROM results), 0));"
 );
-lines.push("COMMIT;");
-lines.push("PRAGMA foreign_keys = ON;");
+dataLines.push("COMMIT;");
+dataLines.push("PRAGMA foreign_keys = ON;");
 
 fs.mkdirSync(path.dirname(outputSqlPath), { recursive: true });
-fs.writeFileSync(outputSqlPath, `${lines.join("\n")}\n`, "utf8");
+fs.writeFileSync(outputSqlPath, `${dataLines.join("\n")}\n`, "utf8");
 
 console.log("SQL dump berhasil dibuat:", path.relative(rootDir, outputSqlPath));
 console.log(
@@ -133,17 +134,68 @@ if (migrationApply.status !== 0) {
   process.exit(migrationApply.status ?? 1);
 }
 
-const executeArgs = [
-  "wrangler",
-  "d1",
-  "execute",
-  "quiz_db",
-  ...(remote ? ["--remote"] : ["--local"]),
-  "--file",
-  outputSqlPath,
+const baseLines = [
+  "PRAGMA foreign_keys = OFF;",
+  "BEGIN TRANSACTION;",
+  "DELETE FROM results;",
+  "DELETE FROM questions;",
+  "DELETE FROM subjects;",
+  "COMMIT;",
+  "PRAGMA foreign_keys = ON;",
 ];
-const execute = spawnSync("npx", executeArgs, {
-  stdio: "inherit",
-  shell: true,
-});
-process.exit(execute.status ?? 1);
+
+const writeTempAndExec = (lines, tag) => {
+  const tempFile = path.join(os.tmpdir(), `d1-${tag}-${Date.now()}.sql`);
+  fs.writeFileSync(tempFile, `${lines.join("\n")}\n`, "utf8");
+  const executeArgs = [
+    "wrangler",
+    "d1",
+    "execute",
+    "quiz_db",
+    ...(remote ? ["--remote"] : ["--local"]),
+    "--file",
+    tempFile,
+  ];
+  const execute = spawnSync("npx", executeArgs, {
+    stdio: "inherit",
+    shell: true,
+  });
+  try {
+    fs.unlinkSync(tempFile);
+  } catch {}
+  return execute.status ?? 1;
+};
+
+const resetStatus = writeTempAndExec(baseLines, "reset");
+if (resetStatus !== 0) process.exit(resetStatus);
+
+for (const table of tables) {
+  const rows = db.prepare(`SELECT ${table.columns.join(", ")} FROM ${table.name} ORDER BY id`).all();
+  const chunkSize = 25;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const chunkLines = ["BEGIN TRANSACTION;"];
+    for (const row of chunk) {
+      const values = table.columns.map((col) => sqlValue(row[col]));
+      chunkLines.push(
+        `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${values.join(", ")});`
+      );
+    }
+    chunkLines.push("COMMIT;");
+    const status = writeTempAndExec(chunkLines, `${table.name}-${i}`);
+    if (status !== 0) process.exit(status);
+  }
+}
+
+const seqStatus = writeTempAndExec(
+  [
+    "BEGIN TRANSACTION;",
+    "DELETE FROM sqlite_sequence WHERE name IN ('subjects','questions','results');",
+    "INSERT INTO sqlite_sequence(name, seq) VALUES ('subjects', COALESCE((SELECT MAX(id) FROM subjects), 0));",
+    "INSERT INTO sqlite_sequence(name, seq) VALUES ('questions', COALESCE((SELECT MAX(id) FROM questions), 0));",
+    "INSERT INTO sqlite_sequence(name, seq) VALUES ('results', COALESCE((SELECT MAX(id) FROM results), 0));",
+    "COMMIT;",
+  ],
+  "sequence"
+);
+process.exit(seqStatus);
