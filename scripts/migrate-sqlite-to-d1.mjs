@@ -65,7 +65,6 @@ const sqlValue = (v) => {
 const dataLines = [];
 dataLines.push("-- Auto-generated from quiz.db");
 dataLines.push("PRAGMA foreign_keys = OFF;");
-dataLines.push("BEGIN TRANSACTION;");
 dataLines.push("DELETE FROM results;");
 dataLines.push("DELETE FROM questions;");
 dataLines.push("DELETE FROM subjects;");
@@ -96,7 +95,6 @@ dataLines.push(
 dataLines.push(
   "INSERT INTO sqlite_sequence(name, seq) VALUES ('results', COALESCE((SELECT MAX(id) FROM results), 0));"
 );
-dataLines.push("COMMIT;");
 dataLines.push("PRAGMA foreign_keys = ON;");
 
 fs.mkdirSync(path.dirname(outputSqlPath), { recursive: true });
@@ -136,11 +134,9 @@ if (migrationApply.status !== 0) {
 
 const baseLines = [
   "PRAGMA foreign_keys = OFF;",
-  "BEGIN TRANSACTION;",
   "DELETE FROM results;",
   "DELETE FROM questions;",
   "DELETE FROM subjects;",
-  "COMMIT;",
   "PRAGMA foreign_keys = ON;",
 ];
 
@@ -174,14 +170,13 @@ for (const table of tables) {
   const chunkSize = 25;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
-    const chunkLines = ["BEGIN TRANSACTION;"];
+    const chunkLines = [];
     for (const row of chunk) {
       const values = table.columns.map((col) => sqlValue(row[col]));
       chunkLines.push(
         `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${values.join(", ")});`
       );
     }
-    chunkLines.push("COMMIT;");
     const status = writeTempAndExec(chunkLines, `${table.name}-${i}`);
     if (status !== 0) process.exit(status);
   }
@@ -189,12 +184,10 @@ for (const table of tables) {
 
 const seqStatus = writeTempAndExec(
   [
-    "BEGIN TRANSACTION;",
     "DELETE FROM sqlite_sequence WHERE name IN ('subjects','questions','results');",
     "INSERT INTO sqlite_sequence(name, seq) VALUES ('subjects', COALESCE((SELECT MAX(id) FROM subjects), 0));",
     "INSERT INTO sqlite_sequence(name, seq) VALUES ('questions', COALESCE((SELECT MAX(id) FROM questions), 0));",
     "INSERT INTO sqlite_sequence(name, seq) VALUES ('results', COALESCE((SELECT MAX(id) FROM results), 0));",
-    "COMMIT;",
   ],
   "sequence"
 );
