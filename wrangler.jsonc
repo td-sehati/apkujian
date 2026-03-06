@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "quiz_db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "4ba6d3fa-2aac-42c3-9220-1226c28d75b0",
       "migrations_dir": "migrations"
     }
   ]
