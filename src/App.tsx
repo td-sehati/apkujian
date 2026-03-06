@@ -53,6 +53,25 @@ interface Question {
   options: string[];
 }
 
+interface QuizQuestion extends Question {
+  optionOrder: number[];
+}
+
+interface StudentDataForm {
+  name: string;
+  nis: string;
+  class: string;
+}
+
+interface QuizAutosavePayload {
+  subjectId: number;
+  studentData: StudentDataForm;
+  questions: QuizQuestion[];
+  currentIndex: number;
+  completedIndices: number[];
+  userAnswers: { id: number; selectedIndex: number }[];
+}
+
 interface QuizResult {
   score: number;
   correctCount: number;
@@ -81,13 +100,14 @@ interface StudentResult {
 }
 
 const MIN_TIME_PER_QUESTION = 40; // 40 seconds
+const QUIZ_AUTOSAVE_PREFIX = 'quiz-autosave';
 
 export default function App() {
   const [step, setStep] = useState<'setup' | 'subject_selection' | 'quiz' | 'result' | 'admin_login' | 'admin_dashboard'>('setup');
-  const [studentData, setStudentData] = useState({ name: '', nis: '', class: '' });
+  const [studentData, setStudentData] = useState<StudentDataForm>({ name: '', nis: '', class: '' });
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [selectedSubject, setSelectedSubject] = useState<Subject | null>(null);
-  const [questions, setQuestions] = useState<Question[]>([]);
+  const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [completedIndices, setCompletedIndices] = useState<Set<number>>(new Set());
   const [userAnswers, setUserAnswers] = useState<{ id: number; selectedIndex: number }[]>([]);
@@ -97,6 +117,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [isDisqualified, setIsDisqualified] = useState(false);
+  const [lastAutosaveAt, setLastAutosaveAt] = useState<string | null>(null);
 
   // Admin States
   const [adminToken, setAdminToken] = useState<string | null>(localStorage.getItem('adminToken'));
@@ -122,6 +143,53 @@ export default function App() {
   const [deletingSubjectId, setDeletingSubjectId] = useState<number | null>(null);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  
+  const getQuizStorageKey = (subjectId: number, identity: StudentDataForm) =>
+    `${QUIZ_AUTOSAVE_PREFIX}:${subjectId}:${identity.nis}:${identity.class}`;
+
+  const shuffleArray = <T,>(items: T[]) => {
+    const arr = [...items];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  };
+
+  const randomizeQuestions = (rawQuestions: Question[]): QuizQuestion[] => {
+    const randomizedQuestions = shuffleArray(rawQuestions).map((q) => {
+      const optionOrder = shuffleArray(q.options.map((_, idx) => idx));
+      return {
+        ...q,
+        options: optionOrder.map((idx) => q.options[idx]),
+        optionOrder,
+      };
+    });
+    return randomizedQuestions;
+  };
+
+  const getDisplayIndexFromAnswer = (question: QuizQuestion, answerIndex: number) => {
+    const displayIndex = question.optionOrder.findIndex((originalIdx) => originalIdx === answerIndex);
+    return displayIndex > -1 ? displayIndex : null;
+  };
+
+  const saveQuizAutosave = (
+    subjectId: number,
+    identity: StudentDataForm,
+    payload: QuizAutosavePayload
+  ) => {
+    localStorage.setItem(getQuizStorageKey(subjectId, identity), JSON.stringify(payload));
+  };
+
+  const clearQuizAutosave = (subjectId?: number, identity?: StudentDataForm) => {
+    if (subjectId && identity) {
+      localStorage.removeItem(getQuizStorageKey(subjectId, identity));
+      return;
+    }
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith(`${QUIZ_AUTOSAVE_PREFIX}:`))
+      .forEach((key) => localStorage.removeItem(key));
+  };
 
   const fetchSubjects = async () => {
     try {
@@ -166,13 +234,41 @@ export default function App() {
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.hidden && step === 'quiz') {
+        if (selectedSubject) {
+          clearQuizAutosave(selectedSubject.id, studentData);
+        }
+        setLastAutosaveAt(null);
+        setQuestions([]);
+        setUserAnswers([]);
+        setCompletedIndices(new Set());
+        setSelectedOption(null);
         setIsDisqualified(true);
         setStep('result');
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [step]);
+  }, [step, selectedSubject, studentData]);
+
+  // Auto-save jawaban selama kuis berjalan
+  useEffect(() => {
+    if (step !== 'quiz' || isDisqualified || !selectedSubject || questions.length === 0) return;
+    saveQuizAutosave(selectedSubject.id, studentData, {
+      subjectId: selectedSubject.id,
+      studentData,
+      questions,
+      currentIndex,
+      completedIndices: Array.from(completedIndices),
+      userAnswers,
+    });
+    setLastAutosaveAt(
+      new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    );
+  }, [step, isDisqualified, selectedSubject, studentData, questions, currentIndex, completedIndices, userAnswers]);
 
   const handleStartSetup = () => {
     if (studentData.name && studentData.nis && studentData.class) {
@@ -183,6 +279,13 @@ export default function App() {
   const handleSelectSubject = (subject: Subject) => {
     setSelectedSubject(subject);
     setIsLoading(true);
+    setIsDisqualified(false);
+    setQuizResult(null);
+    setCurrentIndex(0);
+    setSelectedOption(null);
+    setCompletedIndices(new Set());
+    setUserAnswers([]);
+    setLastAutosaveAt(null);
     fetch(`/api/questions/${subject.id}`)
       .then(res => res.json())
       .then(data => {
@@ -191,7 +294,51 @@ export default function App() {
           setIsLoading(false);
           return;
         }
-        setQuestions(data);
+
+        const randomized = randomizeQuestions(data as Question[]);
+        const savedRaw = localStorage.getItem(getQuizStorageKey(subject.id, studentData));
+
+        if (savedRaw) {
+          try {
+            const saved = JSON.parse(savedRaw) as QuizAutosavePayload;
+            const canRestore = saved.subjectId === subject.id
+              && saved.studentData.nis === studentData.nis
+              && saved.questions?.length > 0
+              && saved.questions.every(q => Array.isArray((q as QuizQuestion).optionOrder));
+
+            if (canRestore) {
+              const restoredQuestions = saved.questions;
+              const restoredIndex = Math.min(saved.currentIndex ?? 0, restoredQuestions.length - 1);
+              const restoredAnswers = Array.isArray(saved.userAnswers) ? saved.userAnswers : [];
+              const restoredCompleted = new Set(saved.completedIndices ?? []);
+              const currentQuestion = restoredQuestions[restoredIndex];
+              const currentAnswer = restoredAnswers.find(a => a.id === currentQuestion?.id);
+              setQuestions(restoredQuestions);
+              setCurrentIndex(restoredIndex);
+              setUserAnswers(restoredAnswers);
+              setCompletedIndices(restoredCompleted);
+              setSelectedOption(
+                currentQuestion && currentAnswer
+                  ? getDisplayIndexFromAnswer(currentQuestion, currentAnswer.selectedIndex)
+                  : null
+              );
+              setLastAutosaveAt(
+                new Date().toLocaleTimeString('id-ID', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })
+              );
+              setStep('quiz');
+              setIsLoading(false);
+              return;
+            }
+          } catch {
+            localStorage.removeItem(getQuizStorageKey(subject.id, studentData));
+          }
+        }
+
+        setQuestions(randomized);
         setStep('quiz');
         setIsLoading(false);
       });
@@ -201,12 +348,14 @@ export default function App() {
     if (selectedOption === null) return;
     if (timeLeft > 0) return;
 
-    const existingAnswerIndex = userAnswers.findIndex(a => a.id === questions[currentIndex].id);
+    const currentQuestion = questions[currentIndex];
+    const selectedOriginalIndex = currentQuestion.optionOrder[selectedOption] ?? selectedOption;
+    const existingAnswerIndex = userAnswers.findIndex(a => a.id === currentQuestion.id);
     let newAnswers = [...userAnswers];
     if (existingAnswerIndex > -1) {
-      newAnswers[existingAnswerIndex] = { id: questions[currentIndex].id, selectedIndex: selectedOption };
+      newAnswers[existingAnswerIndex] = { id: currentQuestion.id, selectedIndex: selectedOriginalIndex };
     } else {
-      newAnswers.push({ id: questions[currentIndex].id, selectedIndex: selectedOption });
+      newAnswers.push({ id: currentQuestion.id, selectedIndex: selectedOriginalIndex });
     }
     setUserAnswers(newAnswers);
     
@@ -216,7 +365,7 @@ export default function App() {
       const nextIndex = currentIndex + 1;
       setCurrentIndex(nextIndex);
       const nextAnswer = newAnswers.find(a => a.id === questions[nextIndex].id);
-      setSelectedOption(nextAnswer ? nextAnswer.selectedIndex : null);
+      setSelectedOption(nextAnswer ? getDisplayIndexFromAnswer(questions[nextIndex], nextAnswer.selectedIndex) : null);
     } else {
       setIsLoading(true);
       try {
@@ -226,6 +375,10 @@ export default function App() {
           body: JSON.stringify({ answers: newAnswers, studentData })
         });
         const data = await res.json();
+        if (selectedSubject) {
+          clearQuizAutosave(selectedSubject.id, studentData);
+        }
+        setLastAutosaveAt(null);
         setQuizResult(data);
         setStep('result');
       } catch (err) {
@@ -239,12 +392,14 @@ export default function App() {
   const handlePrev = () => {
     if (currentIndex > 0) {
       if (selectedOption !== null) {
-        const existingAnswerIndex = userAnswers.findIndex(a => a.id === questions[currentIndex].id);
+        const currentQuestion = questions[currentIndex];
+        const selectedOriginalIndex = currentQuestion.optionOrder[selectedOption] ?? selectedOption;
+        const existingAnswerIndex = userAnswers.findIndex(a => a.id === currentQuestion.id);
         let newAnswers = [...userAnswers];
         if (existingAnswerIndex > -1) {
-          newAnswers[existingAnswerIndex] = { id: questions[currentIndex].id, selectedIndex: selectedOption };
+          newAnswers[existingAnswerIndex] = { id: currentQuestion.id, selectedIndex: selectedOriginalIndex };
         } else {
-          newAnswers.push({ id: questions[currentIndex].id, selectedIndex: selectedOption });
+          newAnswers.push({ id: currentQuestion.id, selectedIndex: selectedOriginalIndex });
         }
         setUserAnswers(newAnswers);
       }
@@ -252,7 +407,7 @@ export default function App() {
       const prevIndex = currentIndex - 1;
       setCurrentIndex(prevIndex);
       const prevAnswer = userAnswers.find(a => a.id === questions[prevIndex].id);
-      setSelectedOption(prevAnswer ? prevAnswer.selectedIndex : null);
+      setSelectedOption(prevAnswer ? getDisplayIndexFromAnswer(questions[prevIndex], prevAnswer.selectedIndex) : null);
     }
   };
 
@@ -927,6 +1082,9 @@ export default function App() {
                   <Timer size={16} />
                   {timeLeft > 0 ? `Tunggu ${timeLeft}s` : 'Siap Lanjut'}
                 </div>
+              </div>
+              <div className="mt-2 text-right text-[11px] text-slate-400">
+                {lastAutosaveAt ? `Progress tersimpan otomatis • ${lastAutosaveAt}` : 'Progress tersimpan otomatis aktif'}
               </div>
 
               {/* Question Card */}
