@@ -7,6 +7,6 @@ coverage/
 node_modules/
 .wrangler/
 quiz.db
-migrations/9999_data_from_local.sql
+.tmp/
 .env*
 !.env.example

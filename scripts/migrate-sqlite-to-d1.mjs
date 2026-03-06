@@ -10,7 +10,7 @@ const Database = require("better-sqlite3");
 const rootDir = process.cwd();
 const sqlitePath = path.join(rootDir, "quiz.db");
 const wranglerPath = path.join(rootDir, "wrangler.jsonc");
-const outputSqlPath = path.join(rootDir, "migrations", "9999_data_from_local.sql");
+const outputSqlPath = path.join(rootDir, ".tmp", "d1_data_from_local.sql");
 
 const args = new Set(process.argv.slice(2));
 const shouldApply = args.has("--apply");
