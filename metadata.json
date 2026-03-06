@@ -1,0 +1,5 @@
+{
+  "name": "Ujian Berbasis Android",
+  "description": "Aplikasi ujian interaktif dengan validasi server dan batasan waktu pengerjaan minimal 1 menit per soal.",
+  "requestFramePermissions": []
+}

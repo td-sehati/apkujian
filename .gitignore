@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+node_modules/
+.wrangler/
+quiz.db
+migrations/9999_data_from_local.sql
+.env*
+!.env.example
