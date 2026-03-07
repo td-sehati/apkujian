@@ -7,6 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { jsPDF } from 'jspdf';
 import * as mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import 'katex/dist/katex.min.css';
@@ -24,6 +25,7 @@ import {
   Loader2,
   Settings,
   Plus,
+  FileSpreadsheet,
   Trash2,
   LogOut,
   ChevronLeft,
@@ -905,6 +907,45 @@ export default function App() {
     window.open(whatsappUrl, '_blank');
   };
 
+  const handleExportResultsBySubject = (subjectName: string, results: StudentResult[]) => {
+    if (results.length === 0) return;
+
+    const rows = results.map((res, idx) => ({
+      No: idx + 1,
+      'Nama Siswa': res.student_name,
+      NIS: res.nis,
+      Kelas: res.class,
+      'Mata Pelajaran': res.subject_name,
+      Nilai: res.score,
+      'Jawaban Benar': res.correct_count,
+      'Total Soal': res.total_questions,
+      'Waktu Selesai': new Date(res.timestamp).toLocaleString('id-ID', {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      }),
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const columnWidths = [
+      { wch: 6 },
+      { wch: 28 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 24 },
+      { wch: 10 },
+      { wch: 14 },
+      { wch: 12 },
+      { wch: 24 },
+    ];
+    worksheet['!cols'] = columnWidths;
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Hasil Ujian');
+
+    const safeSubjectName = subjectName.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
+    XLSX.writeFile(workbook, `Hasil_${safeSubjectName}.xlsx`);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100">
       <div className="max-w-4xl mx-auto px-4 py-8 sm:py-12">
@@ -1440,9 +1481,19 @@ export default function App() {
                               <div className="w-1.5 h-6 bg-indigo-600 rounded-full"></div>
                               <h4 className="text-lg font-bold text-slate-800">{subjectName}</h4>
                             </div>
-                            <span className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-bold">
-                              {results.length} Peserta
-                            </span>
+                            <div className="flex items-center gap-3">
+                              <span className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-bold">
+                                {results.length} Peserta
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleExportResultsBySubject(subjectName, results)}
+                                className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100"
+                              >
+                                <FileSpreadsheet size={14} />
+                                Download Excel
+                              </button>
+                            </div>
                           </div>
                           <div className="overflow-x-auto">
                             <table className="w-full text-left border-collapse">
