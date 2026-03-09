@@ -1537,11 +1537,6 @@ export default function App() {
                                 <p className={res.isCorrect ? 'text-green-700' : 'text-red-700'}>
                                   Jawaban Anda: {res.options[res.userAnswer]}
                                 </p>
-                                {!res.isCorrect && (
-                                  <p className="text-green-700 font-medium">
-                                    Kunci Jawaban: {res.options[res.correctAnswer]}
-                                  </p>
-                                )}
                               </div>
                             </div>
                           </div>
