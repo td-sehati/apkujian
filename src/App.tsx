@@ -102,7 +102,7 @@ interface StudentResult {
   timestamp: string;
 }
 
-const MIN_TIME_PER_QUESTION = 40; // 40 seconds
+const MIN_TIME_PER_QUESTION = 30; // 30 seconds
 const QUIZ_AUTOSAVE_PREFIX = 'quiz-autosave';
 
 export default function App() {
