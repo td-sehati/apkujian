@@ -72,6 +72,7 @@ interface QuizAutosavePayload {
   currentIndex: number;
   completedIndices: number[];
   userAnswers: { id: number; selectedIndex: number }[];
+  draftSelectedOption: number | null;
 }
 
 interface QuizResult {
@@ -145,6 +146,7 @@ export default function App() {
   const [deletingSubjectId, setDeletingSubjectId] = useState<number | null>(null);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const isPageUnloadingRef = useRef(false);
   
   const getQuizStorageKey = (subjectId: number, identity: StudentDataForm) =>
     `${QUIZ_AUTOSAVE_PREFIX}:${subjectId}:${identity.nis}:${identity.class}`;
@@ -173,6 +175,11 @@ export default function App() {
   const getDisplayIndexFromAnswer = (question: QuizQuestion, answerIndex: number) => {
     const displayIndex = question.optionOrder.findIndex((originalIdx) => originalIdx === answerIndex);
     return displayIndex > -1 ? displayIndex : null;
+  };
+
+  const getQuestionByIndex = (items: QuizQuestion[], index: number) => {
+    if (index < 0 || index >= items.length) return null;
+    return items[index];
   };
 
   const saveQuizAutosave = (
@@ -211,6 +218,12 @@ export default function App() {
   // Timer logic
   useEffect(() => {
     if (step === 'quiz' && !isDisqualified) {
+      const activeQuestion = getQuestionByIndex(questions, currentIndex);
+      if (!activeQuestion) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        return;
+      }
+
       if (completedIndices.has(currentIndex)) {
         setTimeLeft(0);
         if (timerRef.current) clearInterval(timerRef.current);
@@ -230,12 +243,32 @@ export default function App() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [currentIndex, step, isDisqualified, completedIndices]);
+  }, [currentIndex, step, isDisqualified, completedIndices, questions]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      isPageUnloadingRef.current = true;
+    };
+
+    const handlePageShow = () => {
+      isPageUnloadingRef.current = false;
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
+    window.addEventListener('pageshow', handlePageShow);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+      window.removeEventListener('pageshow', handlePageShow);
+    };
+  }, []);
 
   // Anti-cheat: Detect tab switching
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.hidden && step === 'quiz') {
+      if (document.hidden && step === 'quiz' && !isPageUnloadingRef.current) {
         if (selectedSubject) {
           clearQuizAutosave(selectedSubject.id, studentData);
         }
@@ -262,6 +295,7 @@ export default function App() {
       currentIndex,
       completedIndices: Array.from(completedIndices),
       userAnswers,
+      draftSelectedOption: selectedOption,
     });
     setLastAutosaveAt(
       new Date().toLocaleTimeString('id-ID', {
@@ -270,7 +304,20 @@ export default function App() {
         second: '2-digit',
       })
     );
-  }, [step, isDisqualified, selectedSubject, studentData, questions, currentIndex, completedIndices, userAnswers]);
+  }, [step, isDisqualified, selectedSubject, studentData, questions, currentIndex, completedIndices, userAnswers, selectedOption]);
+
+  useEffect(() => {
+    if (step !== 'quiz' || questions.length === 0) return;
+    if (currentIndex < questions.length) return;
+
+    const safeIndex = questions.length - 1;
+    const safeQuestion = questions[safeIndex];
+    const safeAnswer = userAnswers.find((answer) => answer.id === safeQuestion.id);
+    setCurrentIndex(safeIndex);
+    setSelectedOption(
+      safeAnswer ? getDisplayIndexFromAnswer(safeQuestion, safeAnswer.selectedIndex) : null
+    );
+  }, [step, questions, currentIndex, userAnswers]);
 
   const handleStartSetup = () => {
     if (studentData.name && studentData.nis && studentData.class) {
@@ -320,8 +367,10 @@ export default function App() {
               setUserAnswers(restoredAnswers);
               setCompletedIndices(restoredCompleted);
               setSelectedOption(
-                currentQuestion && currentAnswer
-                  ? getDisplayIndexFromAnswer(currentQuestion, currentAnswer.selectedIndex)
+                currentQuestion
+                  ? currentAnswer
+                    ? getDisplayIndexFromAnswer(currentQuestion, currentAnswer.selectedIndex)
+                    : saved.draftSelectedOption ?? null
                   : null
               );
               setLastAutosaveAt(
@@ -347,10 +396,14 @@ export default function App() {
   };
 
   const handleNext = async () => {
+    const currentQuestion = getQuestionByIndex(questions, currentIndex);
+    if (!currentQuestion) {
+      console.error("Missing current question during next navigation", { currentIndex, total: questions.length });
+      return;
+    }
     if (selectedOption === null) return;
     if (timeLeft > 0) return;
 
-    const currentQuestion = questions[currentIndex];
     const selectedOriginalIndex = currentQuestion.optionOrder[selectedOption] ?? selectedOption;
     const existingAnswerIndex = userAnswers.findIndex(a => a.id === currentQuestion.id);
     let newAnswers = [...userAnswers];
@@ -392,9 +445,9 @@ export default function App() {
   };
 
   const handlePrev = () => {
-    if (currentIndex > 0) {
+    const currentQuestion = getQuestionByIndex(questions, currentIndex);
+    if (currentIndex > 0 && currentQuestion) {
       if (selectedOption !== null) {
-        const currentQuestion = questions[currentIndex];
         const selectedOriginalIndex = currentQuestion.optionOrder[selectedOption] ?? selectedOption;
         const existingAnswerIndex = userAnswers.findIndex(a => a.id === currentQuestion.id);
         let newAnswers = [...userAnswers];
@@ -946,6 +999,9 @@ export default function App() {
     XLSX.writeFile(workbook, `Hasil_${safeSubjectName}.xlsx`);
   };
 
+  const activeQuestion = getQuestionByIndex(questions, currentIndex);
+  const isQuizStateReady = step !== 'quiz' || (questions.length > 0 && activeQuestion !== null);
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100">
       <div className="max-w-4xl mx-auto px-4 py-8 sm:py-12">
@@ -1105,7 +1161,7 @@ export default function App() {
             </motion.div>
           )}
 
-          {step === 'quiz' && questions.length > 0 && (
+          {step === 'quiz' && isQuizStateReady && activeQuestion && (
             <motion.div
               key="quiz"
               initial={{ opacity: 0, x: 20 }}
@@ -1131,10 +1187,10 @@ export default function App() {
               {/* Question Card */}
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sm:p-8">
                 <div className="mb-6 sm:mb-8">
-                  {questions[currentIndex].image && (
+                  {activeQuestion.image && (
                     <div className="mb-6 rounded-xl overflow-hidden border border-slate-100 bg-slate-50 flex justify-center">
                       <img 
-                        src={questions[currentIndex].image} 
+                        src={activeQuestion.image} 
                         alt="Question" 
                         className="max-h-64 object-contain"
                         referrerPolicy="no-referrer"
@@ -1142,12 +1198,12 @@ export default function App() {
                     </div>
                   )}
                   <div className="text-lg sm:text-xl font-medium leading-relaxed text-slate-800">
-                    {renderFormattedText(questions[currentIndex].question)}
+                    {renderFormattedText(activeQuestion.question)}
                   </div>
                 </div>
 
                 <div className="space-y-3">
-                  {questions[currentIndex].options.map((option, idx) => (
+                  {activeQuestion.options.map((option, idx) => (
                     <button
                       key={idx}
                       onClick={() => setSelectedOption(idx)}
@@ -1195,6 +1251,18 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {step === 'quiz' && !isQuizStateReady && (
+            <motion.div
+              key="quiz-recovering"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center"
+            >
+              <Loader2 className="animate-spin text-indigo-600 mx-auto mb-4" size={36} />
+              <p className="text-slate-600">Memulihkan sesi ujian yang tersimpan...</p>
             </motion.div>
           )}
 
