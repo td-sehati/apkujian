@@ -5,6 +5,7 @@ type Env = {
 };
 
 const ADMIN_TOKEN = "fake-admin-token";
+const INDONESIA_TIME_ZONE = "Asia/Jakarta";
 
 type AnswerInput = {
   id: number;
@@ -51,6 +52,39 @@ const ensureAdmin = (request: Request): Response | null => {
     return json({ message: "Akses ditolak" }, 403);
   }
   return null;
+};
+
+const padDatePart = (value: number) => value.toString().padStart(2, "0");
+
+const normalizeIndonesiaDateTimeInput = (value?: string | null) => {
+  if (!value) return null;
+  const normalized = value.trim().replace(" ", "T");
+  const match = normalized.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+  );
+
+  if (!match) return value;
+
+  const [, year, month, day, hour, minute, second = "00"] = match;
+  return `${year}-${month}-${day}T${hour}:${minute}:${padDatePart(Number(second))}`;
+};
+
+const getCurrentIndonesiaTimestamp = () => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: INDONESIA_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  return `${getPart("year")}-${getPart("month")}-${getPart("day")} ${getPart("hour")}:${getPart("minute")}:${getPart("second")}`;
 };
 
 const handleApi = async (request: Request, env: Env): Promise<Response> => {
@@ -142,7 +176,7 @@ const handleApi = async (request: Request, env: Env): Promise<Response> => {
       body.studentData.class
     ) {
       await env.DB.prepare(
-        "INSERT INTO results (student_name, nis, class, subject_id, score, correct_count, total_questions) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO results (student_name, nis, class, subject_id, score, correct_count, total_questions, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       )
         .bind(
           body.studentData.name,
@@ -151,7 +185,8 @@ const handleApi = async (request: Request, env: Env): Promise<Response> => {
           subjectId,
           finalScore,
           score,
-          totalQuestions
+          totalQuestions,
+          getCurrentIndonesiaTimestamp()
         )
         .run();
     }
@@ -201,7 +236,11 @@ const handleApi = async (request: Request, env: Env): Promise<Response> => {
       const insertResult = await env.DB.prepare(
         "INSERT INTO subjects (name, start_time, end_time) VALUES (?, ?, ?)"
       )
-        .bind(body.name.trim(), body.start_time ?? null, body.end_time ?? null)
+        .bind(
+          body.name.trim(),
+          normalizeIndonesiaDateTimeInput(body.start_time),
+          normalizeIndonesiaDateTimeInput(body.end_time)
+        )
         .run();
       return json({ success: true, id: insertResult.meta.last_row_id });
     } catch {
@@ -269,7 +308,11 @@ const handleApi = async (request: Request, env: Env): Promise<Response> => {
     await env.DB.prepare(
       "UPDATE subjects SET start_time = ?, end_time = ? WHERE id = ?"
     )
-      .bind(body.start_time ?? null, body.end_time ?? null, subjectId)
+      .bind(
+        normalizeIndonesiaDateTimeInput(body.start_time),
+        normalizeIndonesiaDateTimeInput(body.end_time),
+        subjectId
+      )
       .run();
     return json({ success: true });
   }

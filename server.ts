@@ -4,6 +4,37 @@ import Database from "better-sqlite3";
 import path from "path";
 
 const db = new Database("quiz.db");
+const INDONESIA_TIME_ZONE = "Asia/Jakarta";
+
+const padDatePart = (value: number) => value.toString().padStart(2, "0");
+
+const normalizeIndonesiaDateTimeInput = (value?: string | null) => {
+    if (!value) return null;
+    const normalized = value.trim().replace(" ", "T");
+    const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!match) return value;
+
+    const [, year, month, day, hour, minute, second = "00"] = match;
+    return `${year}-${month}-${day}T${hour}:${minute}:${padDatePart(Number(second))}`;
+};
+
+const getCurrentIndonesiaTimestamp = () => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: INDONESIA_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+    }).formatToParts(new Date());
+
+    const getPart = (type: Intl.DateTimeFormatPartTypes) =>
+        parts.find((part) => part.type === type)?.value ?? "";
+
+    return `${getPart("year")}-${getPart("month")}-${getPart("day")} ${getPart("hour")}:${getPart("minute")}:${getPart("second")}`;
+};
 
 // Inisialisasi Database
 db.exec(`
@@ -147,9 +178,9 @@ async function startServer() {
         // Simpan hasil ke database
         if (studentData) {
             db.prepare(`
-                INSERT INTO results (student_name, nis, class, subject_id, score, correct_count, total_questions)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(studentData.name, studentData.nis, studentData.class, subjectId, finalScore, score, totalQuestions);
+                INSERT INTO results (student_name, nis, class, subject_id, score, correct_count, total_questions, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(studentData.name, studentData.nis, studentData.class, subjectId, finalScore, score, totalQuestions, getCurrentIndonesiaTimestamp());
         }
 
         res.json({ score: finalScore, correctCount: score, total: totalQuestions, results });
@@ -192,7 +223,11 @@ async function startServer() {
     app.post("/api/admin/subjects", isAdmin, (req, res) => {
         const { name, start_time, end_time } = req.body;
         try {
-            const info = db.prepare("INSERT INTO subjects (name, start_time, end_time) VALUES (?, ?, ?)").run(name, start_time || null, end_time || null);
+            const info = db.prepare("INSERT INTO subjects (name, start_time, end_time) VALUES (?, ?, ?)").run(
+                name,
+                normalizeIndonesiaDateTimeInput(start_time),
+                normalizeIndonesiaDateTimeInput(end_time)
+            );
             res.json({ success: true, id: info.lastInsertRowid });
         } catch (e) {
             res.status(400).json({ success: false, message: "Mata pelajaran sudah ada" });
@@ -238,7 +273,11 @@ async function startServer() {
         const { id } = req.params;
         const { start_time, end_time } = req.body;
         try {
-            db.prepare("UPDATE subjects SET start_time = ?, end_time = ? WHERE id = ?").run(start_time, end_time, id);
+            db.prepare("UPDATE subjects SET start_time = ?, end_time = ? WHERE id = ?").run(
+                normalizeIndonesiaDateTimeInput(start_time),
+                normalizeIndonesiaDateTimeInput(end_time),
+                id
+            );
             res.json({ success: true });
         } catch (e: any) {
             res.status(500).json({ success: false, message: e.message });

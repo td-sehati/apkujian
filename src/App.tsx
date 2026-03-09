@@ -108,6 +108,7 @@ const MIN_TIME_PER_QUESTION = 20; // 20 seconds
 const QUIZ_AUTOSAVE_PREFIX = 'quiz-autosave';
 const QUIZ_DIAGNOSTIC_KEY = 'quiz-diagnostics';
 const QUIZ_DIAGNOSTIC_LIMIT = 80;
+const INDONESIA_TIME_ZONE = 'Asia/Jakarta';
 
 interface QuizDiagnosticEntry {
   at: string;
@@ -146,6 +147,75 @@ const downloadQuizDiagnostics = () => {
   } catch (error) {
     console.error('Failed to download quiz diagnostics', error);
   }
+};
+
+const padDatePart = (value: number) => value.toString().padStart(2, '0');
+
+const parseIndonesiaDateTime = (value?: string | null) => {
+  if (!value) return null;
+
+  const normalized = value.trim().replace(' ', 'T');
+  const match = normalized.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/
+  );
+
+  if (match) {
+    const [, year, month, day, hour, minute, second = '0'] = match;
+    return new Date(
+      Date.UTC(
+        Number(year),
+        Number(month) - 1,
+        Number(day),
+        Number(hour) - 7,
+        Number(minute),
+        Number(second)
+      )
+    );
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatDateTime = (value?: string | null) => {
+  const parsed = parseIndonesiaDateTime(value);
+  if (!parsed) return "Belum diatur";
+
+  return new Intl.DateTimeFormat('id-ID', {
+    timeZone: INDONESIA_TIME_ZONE,
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(parsed);
+};
+
+const formatDateTimeForInput = (value?: string | null) => {
+  const parsed = parseIndonesiaDateTime(value);
+  if (!parsed) return '';
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: INDONESIA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(parsed);
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? '';
+
+  return `${getPart('year')}-${getPart('month')}-${getPart('day')}T${getPart('hour')}:${getPart('minute')}`;
+};
+
+const normalizeIndonesiaDateTimeInput = (value?: string | null) => {
+  if (!value) return null;
+  const normalized = value.trim().replace(' ', 'T');
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return value;
+
+  const [, year, month, day, hour, minute, second = '00'] = match;
+  return `${year}-${month}-${day}T${hour}:${minute}:${padDatePart(Number(second))}`;
 };
 
 const FormattedText = React.memo(function FormattedText({ text }: { text: string }) {
@@ -1047,6 +1117,8 @@ export default function App() {
     if (!editingSchedule) return;
     setIsAdminLoading(true);
     try {
+      const normalizedStart = normalizeIndonesiaDateTimeInput(editingSchedule.start);
+      const normalizedEnd = normalizeIndonesiaDateTimeInput(editingSchedule.end);
       const res = await fetch(`/api/admin/subjects/${editingSchedule.id}/schedule`, {
         method: 'PUT',
         headers: { 
@@ -1054,13 +1126,13 @@ export default function App() {
           'Authorization': adminToken!
         },
         body: JSON.stringify({ 
-          start_time: editingSchedule.start, 
-          end_time: editingSchedule.end 
+          start_time: normalizedStart, 
+          end_time: normalizedEnd 
         })
       });
       const data = await res.json();
       if (data.success) {
-        setSubjects(subjects.map(s => s.id === editingSchedule.id ? { ...s, start_time: editingSchedule.start, end_time: editingSchedule.end } : s));
+        setSubjects(subjects.map(s => s.id === editingSchedule.id ? { ...s, start_time: normalizedStart ?? undefined, end_time: normalizedEnd ?? undefined } : s));
         setEditingSchedule(null);
         alert("Jadwal berhasil diperbarui!");
       }
@@ -1074,17 +1146,10 @@ export default function App() {
   const isSubjectActive = (subject: Subject) => {
     if (!subject.start_time || !subject.end_time) return true; // No schedule means always open
     const now = new Date();
-    const start = new Date(subject.start_time);
-    const end = new Date(subject.end_time);
+    const start = parseIndonesiaDateTime(subject.start_time);
+    const end = parseIndonesiaDateTime(subject.end_time);
+    if (!start || !end) return true;
     return now >= start && now <= end;
-  };
-
-  const formatDateTime = (isoString?: string) => {
-    if (!isoString) return "Belum diatur";
-    return new Date(isoString).toLocaleString('id-ID', {
-      dateStyle: 'medium',
-      timeStyle: 'short'
-    });
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, isEditing: boolean = false) => {
@@ -1179,10 +1244,7 @@ export default function App() {
       Nilai: res.score,
       'Jawaban Benar': res.correct_count,
       'Total Soal': res.total_questions,
-      'Waktu Selesai': new Date(res.timestamp).toLocaleString('id-ID', {
-        dateStyle: 'medium',
-        timeStyle: 'short'
-      }),
+      'Waktu Selesai': formatDateTime(res.timestamp),
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -1666,8 +1728,8 @@ export default function App() {
                                 <button 
                                   onClick={() => setEditingSchedule({ 
                                     id: subject.id, 
-                                    start: subject.start_time || '', 
-                                    end: subject.end_time || '' 
+                                    start: formatDateTimeForInput(subject.start_time), 
+                                    end: formatDateTimeForInput(subject.end_time) 
                                   })}
                                   className="px-4 py-2 text-sm font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg border border-indigo-100"
                                 >
@@ -1785,10 +1847,7 @@ export default function App() {
                                       <div className="text-[10px] text-slate-400 font-medium">{res.correct_count}/{res.total_questions} Benar</div>
                                     </td>
                                     <td className="py-4 px-6 text-xs text-slate-400">
-                                      {new Date(res.timestamp).toLocaleString('id-ID', {
-                                        dateStyle: 'medium',
-                                        timeStyle: 'short'
-                                      })}
+                                      {formatDateTime(res.timestamp)}
                                     </td>
                                   </tr>
                                 ))}
