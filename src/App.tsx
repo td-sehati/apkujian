@@ -5,7 +5,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { jsPDF } from 'jspdf';
 import * as mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
 import ReactMarkdown from 'react-markdown';
@@ -19,8 +18,6 @@ import {
   CheckCircle2, 
   XCircle, 
   ChevronRight, 
-  Download, 
-  Share2, 
   AlertTriangle,
   Loader2,
   Settings,
@@ -109,6 +106,47 @@ interface StudentResult {
 
 const MIN_TIME_PER_QUESTION = 20; // 20 seconds
 const QUIZ_AUTOSAVE_PREFIX = 'quiz-autosave';
+const QUIZ_DIAGNOSTIC_KEY = 'quiz-diagnostics';
+const QUIZ_DIAGNOSTIC_LIMIT = 80;
+
+interface QuizDiagnosticEntry {
+  at: string;
+  type: string;
+  sessionId: string;
+  step: string;
+  subjectId: number | null;
+  currentIndex: number;
+  questionCount: number;
+  details?: Record<string, unknown>;
+}
+
+const appendQuizDiagnosticEntry = (entry: QuizDiagnosticEntry) => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(QUIZ_DIAGNOSTIC_KEY) ?? '[]');
+    const existing = Array.isArray(parsed) ? parsed : [];
+    const next = [...existing, entry].slice(-QUIZ_DIAGNOSTIC_LIMIT);
+    localStorage.setItem(QUIZ_DIAGNOSTIC_KEY, JSON.stringify(next));
+  } catch (error) {
+    console.error('Failed to store quiz diagnostic entry', error);
+  }
+};
+
+const downloadQuizDiagnostics = () => {
+  try {
+    const raw = localStorage.getItem(QUIZ_DIAGNOSTIC_KEY) ?? '[]';
+    const blob = new Blob([raw], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `quiz-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('Failed to download quiz diagnostics', error);
+  }
+};
 
 const FormattedText = React.memo(function FormattedText({ text }: { text: string }) {
   const parts = text.split(/(\$\$[\s\S]*?\$\$|\$.*?\$)/g);
@@ -132,10 +170,10 @@ const FormattedText = React.memo(function FormattedText({ text }: { text: string
 });
 
 class QuizRenderBoundary extends React.Component<
-  { resetKey: string; children: React.ReactNode },
+  { resetKey: string; children: React.ReactNode; onRenderError?: (error: Error, errorInfo: React.ErrorInfo) => void; onDownloadDiagnostics?: () => void },
   { hasError: boolean }
 > {
-  constructor(props: { resetKey: string; children: React.ReactNode }) {
+  constructor(props: { resetKey: string; children: React.ReactNode; onRenderError?: (error: Error, errorInfo: React.ErrorInfo) => void; onDownloadDiagnostics?: () => void }) {
     super(props);
     this.state = { hasError: false };
   }
@@ -150,6 +188,10 @@ class QuizRenderBoundary extends React.Component<
     }
   }
 
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    this.props.onRenderError?.(error, errorInfo);
+  }
+
   render() {
     if (this.state.hasError) {
       return (
@@ -161,13 +203,22 @@ class QuizRenderBoundary extends React.Component<
           <p className="text-sm text-slate-500 mb-6">
             Progress tersimpan. Muat ulang halaman untuk melanjutkan ujian dari posisi terakhir.
           </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="bg-indigo-600 text-white font-semibold px-6 py-3 rounded-xl hover:bg-indigo-700 transition-all"
-          >
-            Muat Ulang Halaman
-          </button>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <button
+              type="button"
+              onClick={() => this.props.onDownloadDiagnostics?.()}
+              className="border border-slate-200 text-slate-600 font-semibold px-6 py-3 rounded-xl hover:bg-slate-50 transition-all"
+            >
+              Unduh Log Diagnosa
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="bg-indigo-600 text-white font-semibold px-6 py-3 rounded-xl hover:bg-indigo-700 transition-all"
+            >
+              Muat Ulang Halaman
+            </button>
+          </div>
         </div>
       );
     }
@@ -189,7 +240,6 @@ export default function App() {
   const [timeLeft, setTimeLeft] = useState(MIN_TIME_PER_QUESTION);
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [isDisqualified, setIsDisqualified] = useState(false);
   const [lastAutosaveAt, setLastAutosaveAt] = useState<string | null>(null);
 
@@ -218,9 +268,30 @@ export default function App() {
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const isPageUnloadingRef = useRef(false);
+  const diagnosticSessionRef = useRef(`quiz-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const diagnosticContextRef = useRef({
+    step: 'setup',
+    subjectId: null as number | null,
+    currentIndex: 0,
+    questionCount: 0,
+  });
   
   const getQuizStorageKey = (subjectId: number, identity: StudentDataForm) =>
     `${QUIZ_AUTOSAVE_PREFIX}:${subjectId}:${identity.nis}:${identity.class}`;
+
+  const logQuizDiagnostic = React.useCallback((type: string, details: Record<string, unknown> = {}) => {
+    const context = diagnosticContextRef.current;
+    appendQuizDiagnosticEntry({
+      at: new Date().toISOString(),
+      type,
+      sessionId: diagnosticSessionRef.current,
+      step: context.step,
+      subjectId: context.subjectId,
+      currentIndex: context.currentIndex,
+      questionCount: context.questionCount,
+      details,
+    });
+  }, []);
 
   const shuffleArray = <T,>(items: T[]) => {
     const arr = [...items];
@@ -317,6 +388,48 @@ export default function App() {
 
   // Fetch subjects
   useEffect(() => {
+    diagnosticContextRef.current = {
+      step,
+      subjectId: selectedSubject?.id ?? null,
+      currentIndex,
+      questionCount: questions.length,
+    };
+  }, [step, selectedSubject, currentIndex, questions.length]);
+
+  useEffect(() => {
+    logQuizDiagnostic('app_ready', {
+      userAgent: navigator.userAgent,
+      language: navigator.language,
+      platform: navigator.platform,
+      viewport: `${window.innerWidth}x${window.innerHeight}`,
+    });
+  }, [logQuizDiagnostic]);
+
+  useEffect(() => {
+    const handleRuntimeError = (event: ErrorEvent) => {
+      logQuizDiagnostic('window_error', {
+        message: event.message,
+        source: event.filename,
+        line: event.lineno,
+        column: event.colno,
+      });
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      logQuizDiagnostic('unhandled_rejection', {
+        reason: String(event.reason),
+      });
+    };
+
+    window.addEventListener('error', handleRuntimeError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', handleRuntimeError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, [logQuizDiagnostic]);
+
+  useEffect(() => {
     fetchSubjects();
   }, []);
 
@@ -325,16 +438,25 @@ export default function App() {
     if (step === 'quiz' && !isDisqualified) {
       const activeQuestion = getQuestionByIndex(questions, currentIndex);
       if (!activeQuestion) {
+        logQuizDiagnostic('timer_missing_question', {
+          reason: 'active-question-not-found',
+        });
         if (timerRef.current) clearInterval(timerRef.current);
         return;
       }
 
       if (completedIndices.has(currentIndex)) {
+        logQuizDiagnostic('timer_review_mode', {
+          questionId: activeQuestion.id,
+        });
         setTimeLeft(0);
         if (timerRef.current) clearInterval(timerRef.current);
         return;
       }
 
+      logQuizDiagnostic('question_activated', {
+        questionId: activeQuestion.id,
+      });
       setTimeLeft(MIN_TIME_PER_QUESTION);
       if (timerRef.current) clearInterval(timerRef.current);
       
@@ -353,10 +475,12 @@ export default function App() {
   useEffect(() => {
     const handleBeforeUnload = () => {
       isPageUnloadingRef.current = true;
+      logQuizDiagnostic('before_unload');
     };
 
     const handlePageShow = () => {
       isPageUnloadingRef.current = false;
+      logQuizDiagnostic('page_show');
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
@@ -374,6 +498,7 @@ export default function App() {
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.hidden && step === 'quiz' && !isPageUnloadingRef.current) {
+        logQuizDiagnostic('quiz_disqualified_visibility_change');
         if (selectedSubject) {
           clearQuizAutosave(selectedSubject.id, studentData);
         }
@@ -393,7 +518,7 @@ export default function App() {
   // Auto-save jawaban selama kuis berjalan
   useEffect(() => {
     if (step !== 'quiz' || isDisqualified || !selectedSubject || questions.length === 0) return;
-    saveQuizAutosave(selectedSubject.id, studentData, {
+    const payload = {
       subjectId: selectedSubject.id,
       studentData,
       questionStates: questions.map((question) => ({
@@ -404,7 +529,8 @@ export default function App() {
       completedIndices: Array.from(completedIndices),
       userAnswers,
       draftSelectedOption: selectedOption,
-    });
+    };
+    saveQuizAutosave(selectedSubject.id, studentData, payload);
     setLastAutosaveAt(
       new Date().toLocaleTimeString('id-ID', {
         hour: '2-digit',
@@ -419,6 +545,10 @@ export default function App() {
     if (currentIndex < questions.length) return;
 
     const safeIndex = questions.length - 1;
+    logQuizDiagnostic('current_index_corrected', {
+      previousIndex: currentIndex,
+      safeIndex,
+    });
     const safeQuestion = questions[safeIndex];
     const safeAnswer = userAnswers.find((answer) => answer.id === safeQuestion.id);
     setCurrentIndex(safeIndex);
@@ -429,11 +559,21 @@ export default function App() {
 
   const handleStartSetup = () => {
     if (studentData.name && studentData.nis && studentData.class) {
+      diagnosticSessionRef.current = `quiz-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      logQuizDiagnostic('student_setup_complete', {
+        class: studentData.class,
+        nis: studentData.nis,
+      });
       setStep('subject_selection');
     }
   };
 
   const handleSelectSubject = (subject: Subject) => {
+    diagnosticSessionRef.current = `quiz-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    logQuizDiagnostic('subject_selected', {
+      subjectId: subject.id,
+      subjectName: subject.name,
+    });
     setSelectedSubject(subject);
     setIsLoading(true);
     setIsDisqualified(false);
@@ -447,6 +587,9 @@ export default function App() {
       .then(res => res.json())
       .then(data => {
         if (data.length === 0) {
+          logQuizDiagnostic('subject_has_no_questions', {
+            subjectId: subject.id,
+          });
           alert("Mata pelajaran ini belum memiliki soal.");
           setIsLoading(false);
           return;
@@ -492,18 +635,38 @@ export default function App() {
                   second: '2-digit',
                 })
               );
+              logQuizDiagnostic('quiz_restored', {
+                restoredQuestions: restoredQuestions.length,
+                restoredIndex,
+                restoredAnswers: restoredAnswers.length,
+                restoredCompleted: restoredCompleted.size,
+              });
               setStep('quiz');
               setIsLoading(false);
               return;
             }
-          } catch {
+          } catch (error) {
+            logQuizDiagnostic('quiz_restore_failed', {
+              message: error instanceof Error ? error.message : 'unknown',
+            });
             localStorage.removeItem(getQuizStorageKey(subject.id, studentData));
           }
         }
 
         setQuestions(randomized);
+        logQuizDiagnostic('quiz_started_fresh', {
+          questionCount: randomized.length,
+        });
         setStep('quiz');
         setIsLoading(false);
+      })
+      .catch((error) => {
+        logQuizDiagnostic('question_fetch_failed', {
+          message: error instanceof Error ? error.message : 'unknown',
+          subjectId: subject.id,
+        });
+        setIsLoading(false);
+        alert("Gagal mengambil soal. Coba lagi.");
       });
   };
 
@@ -511,6 +674,10 @@ export default function App() {
     const currentQuestion = getQuestionByIndex(questions, currentIndex);
     if (!currentQuestion) {
       console.error("Missing current question during next navigation", { currentIndex, total: questions.length });
+      logQuizDiagnostic('next_missing_question', {
+        currentIndex,
+        total: questions.length,
+      });
       return;
     }
     if (selectedOption === null) return;
@@ -530,10 +697,18 @@ export default function App() {
 
     if (currentIndex < questions.length - 1) {
       const nextIndex = currentIndex + 1;
+      logQuizDiagnostic('question_next', {
+        fromIndex: currentIndex,
+        toIndex: nextIndex,
+        questionId: currentQuestion.id,
+      });
       setCurrentIndex(nextIndex);
       const nextAnswer = newAnswers.find(a => a.id === questions[nextIndex].id);
       setSelectedOption(nextAnswer ? getDisplayIndexFromAnswer(questions[nextIndex], nextAnswer.selectedIndex) : null);
     } else {
+      logQuizDiagnostic('quiz_submit_started', {
+        answerCount: newAnswers.length,
+      });
       setIsLoading(true);
       try {
         const res = await fetch(`/api/submit/${selectedSubject?.id}`, {
@@ -547,9 +722,16 @@ export default function App() {
         }
         setLastAutosaveAt(null);
         setQuizResult(data);
+        logQuizDiagnostic('quiz_submit_succeeded', {
+          score: data?.score,
+          total: data?.total,
+        });
         setStep('result');
       } catch (err) {
         console.error("Submission failed", err);
+        logQuizDiagnostic('quiz_submit_failed', {
+          message: err instanceof Error ? err.message : 'unknown',
+        });
       } finally {
         setIsLoading(false);
       }
@@ -572,6 +754,11 @@ export default function App() {
       }
 
       const prevIndex = currentIndex - 1;
+      logQuizDiagnostic('question_prev', {
+        fromIndex: currentIndex,
+        toIndex: prevIndex,
+        questionId: currentQuestion.id,
+      });
       setCurrentIndex(prevIndex);
       const prevAnswer = userAnswers.find(a => a.id === questions[prevIndex].id);
       setSelectedOption(prevAnswer ? getDisplayIndexFromAnswer(questions[prevIndex], prevAnswer.selectedIndex) : null);
@@ -980,77 +1167,6 @@ export default function App() {
     }
   };
 
-  // --- PDF & WHATSAPP ---
-  const handleDownloadPDF = () => {
-    if (!quizResult) return;
-    setIsGeneratingPDF(true);
-    try {
-      const doc = new jsPDF();
-      const margin = 20;
-      let y = 20;
-      doc.setFontSize(20);
-      doc.text('Laporan Hasil Ujian', 105, y, { align: 'center' });
-      y += 10;
-      doc.setFontSize(14);
-      doc.text(`${selectedSubject?.name} - Kelas X`, 105, y, { align: 'center' });
-      y += 20;
-      doc.setFontSize(12);
-      doc.text(`Nama: ${studentData.name}`, margin, y);
-      y += 7;
-      doc.text(`NIS: ${studentData.nis}`, margin, y);
-      y += 7;
-      doc.text(`Kelas: ${studentData.class}`, margin, y);
-      y += 15;
-      doc.setFontSize(16);
-      doc.text(`Nilai Akhir: ${quizResult.score}`, margin, y);
-      y += 7;
-      doc.setFontSize(12);
-      doc.text(`Benar ${quizResult.correctCount} dari ${quizResult.total} soal`, margin, y);
-      y += 15;
-      doc.setFontSize(14);
-      doc.text('Tinjauan Jawaban:', margin, y);
-      y += 10;
-      doc.setFontSize(10);
-      quizResult.results.forEach((res, i) => {
-        if (y > 270) { doc.addPage(); y = 20; }
-        const questionText = `${i + 1}. ${res.question}`;
-        const splitQuestion = doc.splitTextToSize(questionText, 170);
-        doc.text(splitQuestion, margin, y);
-        y += splitQuestion.length * 5;
-        doc.setTextColor(res.isCorrect ? 0 : 200, res.isCorrect ? 150 : 0, 0);
-        doc.text(`Jawaban Anda: ${res.options[res.userAnswer]}`, margin + 5, y);
-        y += 5;
-        if (!res.isCorrect) {
-          doc.setTextColor(0, 150, 0);
-          doc.text(`Kunci Jawaban: ${res.options[res.correctAnswer]}`, margin + 5, y);
-          y += 5;
-        }
-        doc.setTextColor(0, 0, 0);
-        y += 5;
-      });
-      doc.save(`Hasil_Ujian_${studentData.name.replace(/\s+/g, '_')}.pdf`);
-    } catch (err) {
-      console.error("PDF generation failed", err);
-    } finally {
-      setIsGeneratingPDF(false);
-    }
-  };
-
-  const handleSendToWhatsApp = () => {
-    if (!quizResult) return;
-    const message = `*LAPORAN HASIL UJIAN*\n\n` +
-      `Nama: ${studentData.name}\n` +
-      `NIS: ${studentData.nis}\n` +
-      `Kelas: ${studentData.class}\n` +
-      `Mata Pelajaran: ${selectedSubject?.name}\n\n` +
-      `*NILAI AKHIR: ${quizResult.score}*\n` +
-      `Benar ${quizResult.correctCount} dari ${quizResult.total} soal.\n\n` +
-      `_Dikirim otomatis dari Aplikasi Ujian._`;
-    const encodedMessage = encodeURIComponent(message);
-    const whatsappUrl = `https://wa.me/?text=${encodedMessage}`;
-    window.open(whatsappUrl, '_blank');
-  };
-
   const handleExportResultsBySubject = (subjectName: string, results: StudentResult[]) => {
     if (results.length === 0) return;
 
@@ -1128,7 +1244,7 @@ export default function App() {
                   <div>
                     <p className="text-sm font-medium text-amber-800">Aturan Penting:</p>
                     <ul className="text-xs text-amber-700 list-disc ml-4 mt-1 space-y-1">
-                      <li>Setiap soal wajib dikerjakan minimal selama <strong>40 detik</strong>.</li>
+                      <li>Setiap soal wajib dikerjakan minimal selama <strong>{MIN_TIME_PER_QUESTION} detik</strong>.</li>
                       <li>Dilarang meninggalkan halaman ujian (otomatis diskualifikasi).</li>
                       <li>Jawaban akan divalidasi oleh server secara real-time.</li>
                     </ul>
@@ -1253,7 +1369,18 @@ export default function App() {
           )}
 
           {step === 'quiz' && isQuizStateReady && activeQuestion && (
-            <QuizRenderBoundary resetKey={`${selectedSubject?.id || 'none'}:${currentIndex}:${activeQuestion.id}`}>
+            <QuizRenderBoundary
+              resetKey={`${selectedSubject?.id || 'none'}:${currentIndex}:${activeQuestion.id}`}
+              onDownloadDiagnostics={downloadQuizDiagnostics}
+              onRenderError={(error, errorInfo) => {
+                logQuizDiagnostic('quiz_render_error', {
+                  message: error.message,
+                  stack: error.stack,
+                  componentStack: errorInfo.componentStack,
+                  questionId: activeQuestion.id,
+                });
+              }}
+            >
               <motion.div
                 key="quiz"
                 initial={{ opacity: 0, x: 20 }}
@@ -1423,22 +1550,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <button 
-                      onClick={handleDownloadPDF}
-                      disabled={isGeneratingPDF}
-                      className="flex-1 bg-slate-900 text-white font-semibold py-4 rounded-xl flex items-center justify-center gap-2 hover:bg-slate-800 transition-all disabled:bg-slate-700"
-                    >
-                      {isGeneratingPDF ? <Loader2 className="animate-spin" size={18} /> : <Download size={18} />} 
-                      Unduh PDF
-                    </button>
-                    <button 
-                      onClick={handleSendToWhatsApp}
-                      className="flex-1 bg-indigo-600 text-white font-semibold py-4 rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-700 transition-all"
-                    >
-                      <Share2 size={18} /> Kirim ke Guru
-                    </button>
-                  </div>
                 </>
               ) : (
                 <div className="py-20 flex flex-col items-center">
