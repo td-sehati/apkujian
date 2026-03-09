@@ -59,6 +59,11 @@ interface QuizQuestion extends Question {
   optionOrder: number[];
 }
 
+interface QuizAutosaveQuestionState {
+  id: number;
+  optionOrder: number[];
+}
+
 interface StudentDataForm {
   name: string;
   nis: string;
@@ -68,7 +73,7 @@ interface StudentDataForm {
 interface QuizAutosavePayload {
   subjectId: number;
   studentData: StudentDataForm;
-  questions: QuizQuestion[];
+  questionStates: QuizAutosaveQuestionState[];
   currentIndex: number;
   completedIndices: number[];
   userAnswers: { id: number; selectedIndex: number }[];
@@ -104,6 +109,72 @@ interface StudentResult {
 
 const MIN_TIME_PER_QUESTION = 20; // 20 seconds
 const QUIZ_AUTOSAVE_PREFIX = 'quiz-autosave';
+
+const FormattedText = React.memo(function FormattedText({ text }: { text: string }) {
+  const parts = text.split(/(\$\$[\s\S]*?\$\$|\$.*?\$)/g);
+  return (
+    <div className="prose prose-slate max-w-none">
+      {parts.map((part, i) => {
+        if (part.startsWith('$$') && part.endsWith('$$')) {
+          return <BlockMath key={i} math={part.slice(2, -2)} />;
+        }
+        if (part.startsWith('$') && part.endsWith('$')) {
+          return <InlineMath key={i} math={part.slice(1, -1)} />;
+        }
+        return (
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
+            {part}
+          </ReactMarkdown>
+        );
+      })}
+    </div>
+  );
+});
+
+class QuizRenderBoundary extends React.Component<
+  { resetKey: string; children: React.ReactNode },
+  { hasError: boolean }
+> {
+  constructor(props: { resetKey: string; children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center">
+          <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-4">
+            <AlertTriangle size={28} />
+          </div>
+          <h3 className="text-lg font-bold text-slate-800 mb-2">Tampilan soal gagal dimuat</h3>
+          <p className="text-sm text-slate-500 mb-6">
+            Progress tersimpan. Muat ulang halaman untuk melanjutkan ujian dari posisi terakhir.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="bg-indigo-600 text-white font-semibold px-6 py-3 rounded-xl hover:bg-indigo-700 transition-all"
+          >
+            Muat Ulang Halaman
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const [step, setStep] = useState<'setup' | 'subject_selection' | 'quiz' | 'result' | 'admin_login' | 'admin_dashboard'>('setup');
@@ -182,12 +253,46 @@ export default function App() {
     return items[index];
   };
 
+  const buildQuestionsFromAutosave = (
+    rawQuestions: Question[],
+    questionStates: QuizAutosaveQuestionState[]
+  ): QuizQuestion[] => {
+    const rawById = new Map(rawQuestions.map((question) => [question.id, question]));
+    return questionStates
+      .map((state) => {
+        const sourceQuestion = rawById.get(state.id);
+        if (!sourceQuestion) return null;
+
+        const normalizedOrder = state.optionOrder.filter(
+          (index) => index >= 0 && index < sourceQuestion.options.length
+        );
+
+        if (normalizedOrder.length !== sourceQuestion.options.length) {
+          return {
+            ...sourceQuestion,
+            optionOrder: sourceQuestion.options.map((_, index) => index),
+          };
+        }
+
+        return {
+          ...sourceQuestion,
+          options: normalizedOrder.map((index) => sourceQuestion.options[index]),
+          optionOrder: normalizedOrder,
+        };
+      })
+      .filter((question): question is QuizQuestion => question !== null);
+  };
+
   const saveQuizAutosave = (
     subjectId: number,
     identity: StudentDataForm,
     payload: QuizAutosavePayload
   ) => {
-    localStorage.setItem(getQuizStorageKey(subjectId, identity), JSON.stringify(payload));
+    try {
+      localStorage.setItem(getQuizStorageKey(subjectId, identity), JSON.stringify(payload));
+    } catch (error) {
+      console.error("Failed to save quiz autosave", error);
+    }
   };
 
   const clearQuizAutosave = (subjectId?: number, identity?: StudentDataForm) => {
@@ -291,7 +396,10 @@ export default function App() {
     saveQuizAutosave(selectedSubject.id, studentData, {
       subjectId: selectedSubject.id,
       studentData,
-      questions,
+      questionStates: questions.map((question) => ({
+        id: question.id,
+        optionOrder: question.optionOrder,
+      })),
       currentIndex,
       completedIndices: Array.from(completedIndices),
       userAnswers,
@@ -352,11 +460,15 @@ export default function App() {
             const saved = JSON.parse(savedRaw) as QuizAutosavePayload;
             const canRestore = saved.subjectId === subject.id
               && saved.studentData.nis === studentData.nis
-              && saved.questions?.length > 0
-              && saved.questions.every(q => Array.isArray((q as QuizQuestion).optionOrder));
+              && Array.isArray(saved.questionStates)
+              && saved.questionStates.length > 0
+              && saved.questionStates.every((q) => Array.isArray(q.optionOrder));
 
             if (canRestore) {
-              const restoredQuestions = saved.questions;
+              const restoredQuestions = buildQuestionsFromAutosave(data as Question[], saved.questionStates);
+              if (restoredQuestions.length === 0) {
+                throw new Error("Saved quiz questions could not be restored");
+              }
               const restoredIndex = Math.min(saved.currentIndex ?? 0, restoredQuestions.length - 1);
               const restoredAnswers = Array.isArray(saved.userAnswers) ? saved.userAnswers : [];
               const restoredCompleted = new Set(saved.completedIndices ?? []);
@@ -788,27 +900,6 @@ export default function App() {
     });
   };
 
-  const renderFormattedText = (text: string) => {
-    // Basic LaTeX detection: $...$ for inline, $$...$$ for block
-    const parts = text.split(/(\$\$[\s\S]*?\$\$|\$.*?\$)/g);
-    return (
-      <div className="prose prose-slate max-w-none">
-        {parts.map((part, i) => {
-          if (part.startsWith('$$') && part.endsWith('$$')) {
-            return <BlockMath key={i} math={part.slice(2, -2)} />;
-          } else if (part.startsWith('$') && part.endsWith('$')) {
-            return <InlineMath key={i} math={part.slice(1, -1)} />;
-          }
-          return (
-            <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
-              {part}
-            </ReactMarkdown>
-          );
-        })}
-      </div>
-    );
-  };
-
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, isEditing: boolean = false) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -1162,96 +1253,98 @@ export default function App() {
           )}
 
           {step === 'quiz' && isQuizStateReady && activeQuestion && (
-            <motion.div
-              key="quiz"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="space-y-4 sm:y-6"
-            >
-              {/* Progress & Timer */}
-              <div className="flex items-center justify-between bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-                <div className="flex items-center gap-2 text-slate-500 text-xs sm:text-sm font-medium">
-                  <BookOpen size={18} />
-                  {selectedSubject?.name} - Soal {currentIndex + 1} / {questions.length}
-                </div>
-                <div className={`flex items-center gap-2 px-3 sm:px-4 py-1 rounded-full text-xs sm:text-sm font-bold ${timeLeft > 0 ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
-                  <Timer size={16} />
-                  {timeLeft > 0 ? `Tunggu ${timeLeft}s` : 'Siap Lanjut'}
-                </div>
-              </div>
-              <div className="mt-2 text-right text-[11px] text-slate-400">
-                {lastAutosaveAt ? `Progress tersimpan otomatis • ${lastAutosaveAt}` : 'Progress tersimpan otomatis aktif'}
-              </div>
-
-              {/* Question Card */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sm:p-8">
-                <div className="mb-6 sm:mb-8">
-                  {activeQuestion.image && (
-                    <div className="mb-6 rounded-xl overflow-hidden border border-slate-100 bg-slate-50 flex justify-center">
-                      <img 
-                        src={activeQuestion.image} 
-                        alt="Question" 
-                        className="max-h-64 object-contain"
-                        referrerPolicy="no-referrer"
-                      />
-                    </div>
-                  )}
-                  <div className="text-lg sm:text-xl font-medium leading-relaxed text-slate-800">
-                    {renderFormattedText(activeQuestion.question)}
+            <QuizRenderBoundary resetKey={`${selectedSubject?.id || 'none'}:${currentIndex}:${activeQuestion.id}`}>
+              <motion.div
+                key="quiz"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-4 sm:y-6"
+              >
+                {/* Progress & Timer */}
+                <div className="flex items-center justify-between bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                  <div className="flex items-center gap-2 text-slate-500 text-xs sm:text-sm font-medium">
+                    <BookOpen size={18} />
+                    {selectedSubject?.name} - Soal {currentIndex + 1} / {questions.length}
+                  </div>
+                  <div className={`flex items-center gap-2 px-3 sm:px-4 py-1 rounded-full text-xs sm:text-sm font-bold ${timeLeft > 0 ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
+                    <Timer size={16} />
+                    {timeLeft > 0 ? `Tunggu ${timeLeft}s` : 'Siap Lanjut'}
                   </div>
                 </div>
+                <div className="mt-2 text-right text-[11px] text-slate-400">
+                  {lastAutosaveAt ? `Progress tersimpan otomatis • ${lastAutosaveAt}` : 'Progress tersimpan otomatis aktif'}
+                </div>
 
-                <div className="space-y-3">
-                  {activeQuestion.options.map((option, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedOption(idx)}
-                      className={`w-full text-left p-4 rounded-xl border transition-all flex items-center gap-3 sm:gap-4 ${
-                        selectedOption === idx 
-                        ? 'border-indigo-600 bg-indigo-50 text-indigo-700 ring-1 ring-indigo-600' 
-                        : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
-                      }`}
-                    >
-                      <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold shrink-0 text-sm ${
-                        selectedOption === idx ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'
-                      }`}>
-                        {String.fromCharCode(65 + idx)}
-                      </span>
-                      <div className="text-sm sm:text-base flex-1">
-                        {renderFormattedText(option)}
+                {/* Question Card */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sm:p-8">
+                  <div className="mb-6 sm:mb-8">
+                    {activeQuestion.image && (
+                      <div className="mb-6 rounded-xl overflow-hidden border border-slate-100 bg-slate-50 flex justify-center">
+                        <img 
+                          src={activeQuestion.image} 
+                          alt="Question" 
+                          className="max-h-64 object-contain"
+                          referrerPolicy="no-referrer"
+                        />
                       </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mt-8 sm:mt-10 flex flex-col sm:flex-row items-center justify-between gap-4">
-                  <p className="text-[10px] sm:text-xs text-slate-400 italic text-center sm:text-left">
-                    {completedIndices.has(currentIndex) 
-                      ? "* Meninjau soal: Aturan waktu tidak berlaku." 
-                      : "* Tombol selanjutnya akan aktif setelah 40 detik pengerjaan."}
-                  </p>
-                  <div className="flex w-full sm:w-auto gap-3">
-                    {currentIndex > 0 && (
-                      <button
-                        onClick={handlePrev}
-                        className="flex-1 sm:flex-none border border-slate-200 text-slate-600 font-semibold px-6 py-4 sm:py-3 rounded-xl transition-all hover:bg-slate-50"
-                      >
-                        Kembali
-                      </button>
                     )}
-                    <button
-                      onClick={handleNext}
-                      disabled={selectedOption === null || timeLeft > 0 || isLoading}
-                      className="flex-1 sm:flex-none bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold px-8 py-4 sm:py-3 rounded-xl transition-all flex items-center justify-center gap-2"
-                    >
-                      {isLoading ? <Loader2 className="animate-spin" /> : (currentIndex === questions.length - 1 ? 'Selesai' : 'Selanjutnya')}
-                      <ChevronRight size={20} />
-                    </button>
+                    <div className="text-lg sm:text-xl font-medium leading-relaxed text-slate-800">
+                      <FormattedText text={activeQuestion.question} />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    {activeQuestion.options.map((option, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setSelectedOption(idx)}
+                        className={`w-full text-left p-4 rounded-xl border transition-all flex items-center gap-3 sm:gap-4 ${
+                          selectedOption === idx 
+                          ? 'border-indigo-600 bg-indigo-50 text-indigo-700 ring-1 ring-indigo-600' 
+                          : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold shrink-0 text-sm ${
+                          selectedOption === idx ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'
+                        }`}>
+                          {String.fromCharCode(65 + idx)}
+                        </span>
+                        <div className="text-sm sm:text-base flex-1">
+                          <FormattedText text={option} />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-8 sm:mt-10 flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <p className="text-[10px] sm:text-xs text-slate-400 italic text-center sm:text-left">
+                      {completedIndices.has(currentIndex) 
+                        ? "* Meninjau soal: Aturan waktu tidak berlaku." 
+                        : `* Tombol selanjutnya akan aktif setelah ${MIN_TIME_PER_QUESTION} detik pengerjaan.`}
+                    </p>
+                    <div className="flex w-full sm:w-auto gap-3">
+                      {currentIndex > 0 && (
+                        <button
+                          onClick={handlePrev}
+                          className="flex-1 sm:flex-none border border-slate-200 text-slate-600 font-semibold px-6 py-4 sm:py-3 rounded-xl transition-all hover:bg-slate-50"
+                        >
+                          Kembali
+                        </button>
+                      )}
+                      <button
+                        onClick={handleNext}
+                        disabled={selectedOption === null || timeLeft > 0 || isLoading}
+                        className="flex-1 sm:flex-none bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold px-8 py-4 sm:py-3 rounded-xl transition-all flex items-center justify-center gap-2"
+                      >
+                        {isLoading ? <Loader2 className="animate-spin" /> : (currentIndex === questions.length - 1 ? 'Selesai' : 'Selanjutnya')}
+                        <ChevronRight size={20} />
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </motion.div>
+              </motion.div>
+            </QuizRenderBoundary>
           )}
 
           {step === 'quiz' && !isQuizStateReady && (
@@ -1905,7 +1998,7 @@ export default function App() {
                                           )}
                                           <div className="text-sm font-medium text-slate-800">
                                             <span className="text-slate-400 mr-2">{idx + 1}.</span>
-                                            {renderFormattedText(q.question)}
+                                            <FormattedText text={q.question} />
                                           </div>
                                         </div>
                                         <div className="flex gap-1 shrink-0">
@@ -1928,7 +2021,7 @@ export default function App() {
                                       <div className="grid grid-cols-2 gap-x-6 gap-y-1 mt-3">
                                         {q.options.map((opt: string, i: number) => (
                                           <div key={i} className={`text-xs ${q.answer === i ? 'text-green-600 font-bold' : 'text-slate-500'}`}>
-                                            {String.fromCharCode(65 + i)}. {renderFormattedText(opt)}
+                                            {String.fromCharCode(65 + i)}. <FormattedText text={opt} />
                                           </div>
                                         ))}
                                       </div>
